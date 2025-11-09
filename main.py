@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -84,7 +84,7 @@ def is_admin(user_id):
 
 async def cleanup_sessions():
     while True:
-        await asyncio.sleep(3600)  # раз в час
+        await asyncio.sleep(3600)
         threshold = datetime.utcnow() - timedelta(hours=24)
         supabase.table("sessions").delete().lt("updated_at", threshold.isoformat()).execute()
 
@@ -114,6 +114,7 @@ async def passenger_start(message: types.Message, state: FSMContext):
             await message.answer("Вы заблокированы.")
             return
         await message.answer("Привет! Что хотите?", reply_markup=get_main_passenger_kb())
+
 @passenger_dp.message(F.contact)
 async def passenger_contact(message: types.Message):
     phone = message.contact.phone_number
@@ -167,9 +168,7 @@ async def order_child(call: types.CallbackQuery, state: FSMContext):
         "status": "new"
     }).execute().data[0]
 
-    # Уведомляем всех водителей
     drivers = supabase.table("users").select("telegram_id").eq("role", "driver").execute().data
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Сделать предложение", callback_data=f"offer_{order['id']}")]
     ])
@@ -183,7 +182,7 @@ async def order_child(call: types.CallbackQuery, state: FSMContext):
         except:
             pass
 
-    await call.message.edit_text("Заказ создан! Ожидаем предложения от водителей.", reply_markup=get_main_passenger_kb())
+    await call.message.edit_text("Заказ создан! Ожидаем предложения.", reply_markup=get_main_passenger_kb())
 
 # === Предложение от водителя ===
 @driver_dp.callback_query(F.data.startswith("offer_"))
@@ -206,15 +205,17 @@ async def driver_price(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     await state.clear()
-offer = supabase.table("offers").insert({
+
+    offer = supabase.table("offers").insert({
         "order_id": data["order_id"],
         "driver_id": message.from_user.id,
         "car_model": data["car_model"],
         "price": int(message.text)
     }).execute().data[0]
 
-    # Уведомляем пассажира
+    # Исправленная строка:
     order = supabase.table("orders").select("passenger_id").eq("id", data["order_id"]).execute().data[0]
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{data['car_model']} — {message.text} ₽", callback_data=f"accept_{offer['id']}")]
     ])
@@ -225,7 +226,7 @@ offer = supabase.table("offers").insert({
     )
     await message.answer("Предложение отправлено!", reply_markup=get_main_driver_kb(is_admin(is_admin(message.from_user.id))))
 
-# === Принятие заказа ===
+# === Остальной код без изменений ===
 @passenger_dp.callback_query(F.data.startswith("accept_"))
 async def accept_offer(call: types.CallbackQuery):
     offer_id = int(call.data.split("_")[1])
@@ -233,7 +234,6 @@ async def accept_offer(call: types.CallbackQuery):
     supabase.table("offers").update({"accepted": True}).eq("id", offer_id).execute()
     supabase.table("orders").update({"status": "accepted"}).eq("id", offer["order_id"]).execute()
 
-    # Создаём чат
     order = supabase.table("orders").select("passenger_id").eq("id", offer["order_id"]).execute().data[0]
     supabase.table("chats").insert({
         "order_id": offer["order_id"],
@@ -241,11 +241,9 @@ async def accept_offer(call: types.CallbackQuery):
         "passenger_id": order["passenger_id"]
     }).execute()
 
-    # Номера
     driver = await get_user(offer["driver_id"])
     passenger = await get_user(order["passenger_id"])
 
-    # Кнопки чата
     chat_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Чат с водителем", callback_data=f"chat_driver_{offer['order_id']}")],
         [InlineKeyboardButton(text="Закрыть чат", callback_data=f"close_chat_{offer['order_id']}")]
@@ -253,7 +251,6 @@ async def accept_offer(call: types.CallbackQuery):
     await passenger_bot.send_message(call.from_user.id, f"Заказ принят!\nВодитель: {driver['name']}\nТелефон: {driver['phone']}", reply_markup=chat_kb)
     await driver_bot.send_message(offer["driver_id"], f"Заказ принят!\nПассажир: {passenger['name']}\nТелефон: {passenger['phone']}", reply_markup=chat_kb)
 
-# === Чат между водителем и пассажиром ===
 @passenger_dp.callback_query(F.data.startswith("chat_driver_"))
 async def open_chat_passenger(call: types.CallbackQuery):
     order_id = int(call.data.split("_")[2])
@@ -261,7 +258,7 @@ async def open_chat_passenger(call: types.CallbackQuery):
     if chat["closed"]:
         await call.answer("Чат закрыт")
         return
-    await call.message.edit_text("Пишите сообщение водителю (фото, голос, документ):")
+    await call.message.edit_text("Пишите водителю (фото, голос, документ):")
 
 @driver_dp.callback_query(F.data.startswith("chat_driver_"))
 async def open_chat_driver(call: types.CallbackQuery):
@@ -272,10 +269,8 @@ async def open_chat_driver(call: types.CallbackQuery):
         return
     await call.message.edit_text("Пишите пассажиру:")
 
-# Пересылка сообщений
 @passenger_dp.message(F.chat.type == "private", F.content_type.in_({"text", "photo", "voice", "document"}))
 async def forward_to_driver(message: types.Message):
-    # Проверяем, в чате ли
     chats = supabase.table("chats").select("*").eq("passenger_id", message.from_user.id).execute().data
     if not chats or chats[0]["closed"]:
         return
@@ -284,20 +279,18 @@ async def forward_to_driver(message: types.Message):
 
 @driver_dp.message(F.chat.type == "private", F.content_type.in_({"text", "photo", "voice", "document"}))
 async def forward_to_passenger(message: types.Message):
-chats = supabase.table("chats").select("*").eq("driver_id", message.from_user.id).execute().data
+    chats = supabase.table("chats").select("*").eq("driver_id", message.from_user.id).execute().data
     if not chats or chats[0]["closed"]:
         return
     chat = chats[0]
     await passenger_bot.copy_message(chat_id=chat["passenger_id"], from_chat_id=message.chat.id, message_id=message.message_id)
 
-# === Закрытие чата ===
 @passenger_dp.callback_query(F.data.startswith("close_chat_"))
 async def close_chat(call: types.CallbackQuery):
     order_id = int(call.data.split("_")[2])
     supabase.table("chats").update({"closed": True}).eq("order_id", order_id).execute()
     await call.message.edit_text("Чат закрыт.")
 
-# === Чат с админом ===
 @passenger_dp.message(F.text == "Чат с админом")
 async def chat_admin_passenger(message: types.Message):
     await message.answer("Пишите админу:", reply_markup=types.ReplyKeyboardRemove())
@@ -308,7 +301,6 @@ async def chat_admin_driver(message: types.Message):
     await message.answer("Пишите админу:", reply_markup=types.ReplyKeyboardRemove())
     await driver_bot.copy_message(chat_id=ADMIN_ID, from_chat_id=message.chat.id, message_id=message.message_id)
 
-# === АДМИН-ПАНЕЛЬ (в водительском боте) ===
 @driver_dp.message(F.text == "Админ-панель")
 async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -327,7 +319,7 @@ async def list_users(message: types.Message):
     users = supabase.table("users").select("telegram_id,name,role,blocked").execute().data
     text = "Пользователи:\n"
     for u in users:
-        status = "🔴 Заблокирован" if u["blocked"] else "🟢 Активен"
+        status = "Заблокирован" if u["blocked"] else "Активен"
         text += f"{u['name']} (@{u['telegram_id']}) — {u['role']} {status}\n"
     await message.answer(text)
 
@@ -340,7 +332,6 @@ async def list_orders(message: types.Message):
         text += f"ID {o['id']} | {o['from_address']} → {o['to_address']} | {o['status']}\n"
     await message.answer(text)
 
-# === Запуск ===
 async def main():
     asyncio.create_task(cleanup_sessions())
     await asyncio.gather(
@@ -349,5 +340,4 @@ async def main():
     )
 
 if __name__ == "__main__":
-
     asyncio.run(main())
