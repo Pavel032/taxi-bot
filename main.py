@@ -34,8 +34,8 @@ driver_dp = Dispatcher(storage=MemoryStorage())
 
 # === Состояния ===
 class PassengerOrder(StatesGroup):
-    from_address = State()
-    to_address = State()
+    from_addr = State()
+    to_addr = State()
     comment = State()
     luggage = State()
     child = State()
@@ -340,4 +340,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
