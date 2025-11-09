@@ -8,7 +8,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from supabase import create_client
+from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,7 +20,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # === Логи ===
 logging.basicConfig(level=logging.INFO)
@@ -213,7 +213,6 @@ async def driver_price(message: types.Message, state: FSMContext):
         "price": int(message.text)
     }).execute().data[0]
 
-    # Исправленная строка:
     order = supabase.table("orders").select("passenger_id").eq("id", data["order_id"]).execute().data[0]
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -226,7 +225,7 @@ async def driver_price(message: types.Message, state: FSMContext):
     )
     await message.answer("Предложение отправлено!", reply_markup=get_main_driver_kb(is_admin(is_admin(message.from_user.id))))
 
-# === Остальной код без изменений ===
+# === Остальное без изменений ===
 @passenger_dp.callback_query(F.data.startswith("accept_"))
 async def accept_offer(call: types.CallbackQuery):
     offer_id = int(call.data.split("_")[1])
