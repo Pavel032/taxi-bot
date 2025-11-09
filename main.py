@@ -182,7 +182,8 @@ async def order_child(call: types.CallbackQuery, state: FSMContext):
         except:
             pass
 
-    await call.message.edit_text("Заказ создан! Ожидаем предложения.", reply_markup=get_main_passenger_kb())
+    await call.message.edit_text("Заказ создан! Ожидаем предложения.")
+    await call.message.answer("Выберете действие:", reply_markup=get_main_passenger_kb())
 
 # === Предложение от водителя ===
 @driver_dp.callback_query(F.data.startswith("offer_"))
@@ -340,5 +341,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
