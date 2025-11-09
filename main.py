@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# === ТОКЕНЫ И БАЗА ===
+# === КОНФИГ ===
 PASSENGER_TOKEN = os.getenv("PASSENGER_BOT_TOKEN")
 DRIVER_TOKEN = os.getenv("DRIVER_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -21,45 +20,43 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# === Логи ===
 logging.basicConfig(level=logging.INFO)
 
-# === Боты ===
 passenger_bot = Bot(token=PASSENGER_TOKEN)
 driver_bot = Bot(token=DRIVER_TOKEN)
-
 passenger_dp = Dispatcher(storage=MemoryStorage())
 driver_dp = Dispatcher(storage=MemoryStorage())
 
-# === Состояния ===
+# === СОСТОЯНИЯ ===
 class PassengerOrder(StatesGroup):
     from_address = State()
     to_address = State()
     comment = State()
     luggage = State()
     child = State()
+    confirm = State()
 
 class DriverOffer(StatesGroup):
     car_model = State()
     price = State()
 
-# === Клавиатуры ===
+# === КЛАВИАТУРЫ ===
 def get_phone_kb():
     return ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True,
         keyboard=[[KeyboardButton(text="Поделиться номером", request_contact=True)]])
 
 def get_main_passenger_kb():
-    return ReplyKeyboardMarkup(resize_keyboard=True,
-        keyboard=[
-            [KeyboardButton(text="Заказать такси")],
-            [KeyboardButton(text="Чат с админом")],
-            [KeyboardButton(text="Мои заказы")]
-        ])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [KeyboardButton(text="Заказать такси")],
+        [KeyboardButton(text="Мои заказы")],
+        [KeyboardButton(text="Отменить заказ")],
+        [KeyboardButton(text="Чат с админом")]
+    ])
 
 def get_main_driver_kb(is_admin=False):
     buttons = [
         [KeyboardButton(text="Активные заказы")],
+        [KeyboardButton(text="Отменить поездку")],
         [KeyboardButton(text="Чат с админом")]
     ]
     if is_admin:
@@ -78,31 +75,39 @@ def get_child_kb():
          InlineKeyboardButton(text="Нет", callback_data="child_no")]
     ])
 
-# === Утилиты ===
-def is_admin(user_id):
-    return user_id == ADMIN_ID
+def get_confirm_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Подтвердить", callback_data="confirm_yes"),
+         InlineKeyboardButton(text="Отменить", callback_data="confirm_no")]
+    ])
 
-async def cleanup_sessions():
-    while True:
-        await asyncio.sleep(3600)
-        threshold = datetime.utcnow() - timedelta(hours=24)
-        supabase.table("sessions").delete().lt("updated_at", threshold.isoformat()).execute()
+# === УТИЛИТЫ ===
+def is_admin(user_id): return user_id == ADMIN_ID
 
 async def get_user(tg_id):
     res = supabase.table("users").select("*").eq("telegram_id", tg_id).execute()
     return res.data[0] if res.data else None
 
 async def create_user(tg_id, role, name=None, phone=None):
-    data = {
-        "telegram_id": tg_id,
-        "role": role,
-        "name": name or "Не указано",
-        "phone": phone or "",
-        "blocked": False
-    }
+    data = {"telegram_id": tg_id, "role": role, "name": name or "Не указано", "phone": phone or "", "blocked": False}
     return supabase.table("users").insert(data).execute().data[0]
 
-# === ПАССАЖИРСКИЙ БОТ ===
+async def notify_drivers(order, data):
+    drivers = supabase.table("users").select("telegram_id").eq("role", "driver").execute().data
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Сделать предложение", callback_data=f"offer_{order['id']}")]])
+    for d in drivers:
+        try:
+            await driver_bot.send_message(d["telegram_id"],
+                f"Новый заказ!\n"
+                f"От: {data['from_address']}\n"
+                f"Куда: {data['to_address']}\n"
+                f"Комментарий: {data['comment'] or '—'}\n"
+                f"Багаж: {'Да' if data['luggage'] else 'Нет'}\n"
+                f"Ребёнок: {'Да' if data['child'] else 'Нет'}",
+                reply_markup=kb)
+        except Exception as e: print(f"[ОШИБКА] Уведомление {d['telegram_id']}: {e}")
+
+# === ПАССАЖИР ===
 @passenger_dp.message(Command("start"))
 async def passenger_start(message: types.Message, state: FSMContext):
     user = await get_user(message.from_user.id)
@@ -110,15 +115,12 @@ async def passenger_start(message: types.Message, state: FSMContext):
         await create_user(message.from_user.id, "passenger", message.from_user.full_name)
         await message.answer("Привет! Поделись номером для работы с ботом:", reply_markup=get_phone_kb())
     else:
-        if user["blocked"]:
-            await message.answer("Вы заблокированы.")
-            return
+        if user["blocked"]: await message.answer("Вы заблокированы."); return
         await message.answer("Привет! Что хотите?", reply_markup=get_main_passenger_kb())
 
 @passenger_dp.message(F.contact)
 async def passenger_contact(message: types.Message):
-    phone = message.contact.phone_number
-    supabase.table("users").update({"phone": phone}).eq("telegram_id", message.from_user.id).execute()
+    supabase.table("users").update({"phone": message.contact.phone_number}).eq("telegram_id", message.from_user.id).execute()
     await message.answer("Номер сохранён!", reply_markup=get_main_passenger_kb())
 
 @passenger_dp.message(F.text == "Заказать такси")
@@ -146,50 +148,54 @@ async def order_comment(message: types.Message, state: FSMContext):
 
 @passenger_dp.callback_query(F.data.startswith("luggage_"))
 async def order_luggage(call: types.CallbackQuery, state: FSMContext):
-    luggage = call.data == "luggage_yes"
-    await state.update_data(luggage=luggage)
+    await state.update_data(luggage=call.data == "luggage_yes")
     await state.set_state(PassengerOrder.child)
-    await call.message.edit_text(f"Багаж: {'Да' if luggage else 'Нет'}\nРебёнок?", reply_markup=get_child_kb())
+    await call.message.edit_text(f"Багаж: {'Да' if call.data == 'luggage_yes' else 'Нет'}\nРебёнок?", reply_markup=get_child_kb())
 
 @passenger_dp.callback_query(F.data.startswith("child_"))
 async def order_child(call: types.CallbackQuery, state: FSMContext):
-    child = call.data == "child_yes"
     data = await state.get_data()
-    data["child"] = child
+    data["child"] = call.data == "child_yes"
+    await state.set_state(PassengerOrder.confirm)
+    text = (
+        f"**Проверьте заказ:**\n\n"
+        f"**Откуда:** {data['from_address']}\n"
+        f"**Куда:** {data['to_address']}\n"
+        f"**Комментарий:** {data['comment'] or '—'}\n"
+        f"**Багаж:** {'Да' if data['luggage'] else 'Нет'}\n"
+        f"**Ребёнок:** {'Да' if data['child'] else 'Нет'}\n\n"
+        f"Подтвердить создание заказа?"
+    )
+    await call.message.edit_text(text, reply_markup=get_confirm_kb(), parse_mode="Markdown")
+
+@passenger_dp.callback_query(F.data == "confirm_yes")
+async def confirm_order(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
     await state.clear()
-
     order = supabase.table("orders").insert({
-        "passenger_id": call.from_user.id,
-        "from_address": data["from_address"],
-        "to_address": data["to_address"],
-        "comment": data["comment"],
-        "luggage": data["luggage"],
-        "child": data["child"],
-        "status": "new"
+        "passenger_id": call.from_user.id, "from_address": data["from_address"], "to_address": data["to_address"],
+        "comment": data["comment"], "luggage": data["luggage"], "child": data["child"], "status": "new"
     }).execute().data[0]
-
-    # === УВЕДОМЛЕНИЯ ВОДИТЕЛЯМ ===
-    drivers = supabase.table("users").select("telegram_id").eq("role", "driver").execute().data
-    print(f"[ЛОГ] Найдено водителей: {len(drivers)}")
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Сделать предложение", callback_data=f"offer_{order['id']}")]
-    ])
-    for driver in drivers:
-        try:
-            await driver_bot.send_message(
-                chat_id=driver["telegram_id"],
-                text=f"Новый заказ!\nОт: {data['from_address']}\nКуда: {data['to_address']}\nКомментарий: {data['comment'] or '—'}\nБагаж: {'Да' if data['luggage'] else 'Нет'}\nРебёнок: {'Да' if child else 'Нет'}",
-                reply_markup=kb
-            )
-            print(f"[ЛОГ] Уведомление отправлено водителю {driver['telegram_id']}")
-        except Exception as e:
-            print(f"[ОШИБКА] Не удалось отправить водителю {driver['telegram_id']}: {e}")
-
-    await call.message.edit_text("Заказ создан! Ожидаем предложения.")
+    await notify_drivers(order, data)
+    await call.message.edit_text("Заказ создан и отправлен водителям!")
     await call.message.answer("Выберите действие:", reply_markup=get_main_passenger_kb())
 
-# === ВОДИТЕЛЬСКИЙ БОТ ===
+@passenger_dp.callback_query(F.data == "confirm_no")
+async def cancel_order_creation(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("Заказ отменён.")
+    await call.message.answer("Выберите действие:", reply_markup=get_main_passenger_kb())
+
+@passenger_dp.message(F.text == "Отменить заказ")
+async def cancel_order_by_passenger(message: types.Message):
+    orders = supabase.table("orders").select("id").eq("passenger_id", message.from_user.id).in_("status", ["new", "accepted"]).execute().data
+    if not orders: await message.answer("У вас нет активных заказов."); return
+    supabase.table("orders").update({"status": "canceled"}).eq("id", orders[0]["id"]).execute()
+    await message.answer(f"Заказ #{orders[0]['id']} отменён.")
+    offer = supabase.table("offers").select("driver_id").eq("order_id", orders[0]["id"]).eq("accepted", True).execute().data
+    if offer: await driver_bot.send_message(offer[0]["driver_id"], f"Пассажир отменил заказ #{orders[0]['id']}.")
+
+# === ВОДИТЕЛЬ ===
 @driver_dp.message(Command("start"))
 async def driver_start(message: types.Message, state: FSMContext):
     user = await get_user(message.from_user.id)
@@ -197,21 +203,17 @@ async def driver_start(message: types.Message, state: FSMContext):
         await create_user(message.from_user.id, "driver", message.from_user.full_name)
         await message.answer("Привет, водитель! Поделись номером для работы:", reply_markup=get_phone_kb())
     else:
-        if user["blocked"]:
-            await message.answer("Вы заблокированы.")
-            return
+        if user["blocked"]: await message.answer("Вы заблокированы."); return
         await message.answer("Привет, водитель! Что хотите?", reply_markup=get_main_driver_kb(is_admin(message.from_user.id)))
 
 @driver_dp.message(F.contact)
 async def driver_contact(message: types.Message):
-    phone = message.contact.phone_number
-    supabase.table("users").update({"phone": phone}).eq("telegram_id", message.from_user.id).execute()
+    supabase.table("users").update({"phone": message.contact.phone_number}).eq("telegram_id", message.from_user.id).execute()
     await message.answer("Номер сохранён!", reply_markup=get_main_driver_kb(is_admin(message.from_user.id)))
 
 @driver_dp.callback_query(F.data.startswith("offer_"))
 async def driver_offer_start(call: types.CallbackQuery, state: FSMContext):
-    order_id = int(call.data.split("_")[1])
-    await state.update_data(order_id=order_id)
+    await state.update_data(order_id=int(call.data.split("_")[1]))
     await state.set_state(DriverOffer.car_model)
     await call.message.edit_text("Марка и модель авто:")
 
@@ -223,139 +225,90 @@ async def driver_car(message: types.Message, state: FSMContext):
 
 @driver_dp.message(DriverOffer.price)
 async def driver_price(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("Только цифры!")
-        return
-    data = await state.get_data()
-    await state.clear()
-
+    if not message.text.isdigit(): await message.answer("Только цифры!"); return
+    data = await state.get_data(); await state.clear()
     offer = supabase.table("offers").insert({
-        "order_id": data["order_id"],
-        "driver_id": message.from_user.id,
-        "car_model": data["car_model"],
-        "price": int(message.text)
+        "order_id": data["order_id"], "driver_id": message.from_user.id,
+        "car_model": data["car_model"], "price": int(message.text), "rejected": False
     }).execute().data[0]
-
     order = supabase.table("orders").select("passenger_id").eq("id", data["order_id"]).execute().data[0]
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{data['car_model']} — {message.text} ₽", callback_data=f"accept_{offer['id']}")]
+        [InlineKeyboardButton(text="Принять", callback_data=f"accept_{offer['id']}"),
+         InlineKeyboardButton(text="Отклонить", callback_data=f"reject_{offer['id']}")]
     ])
-    await passenger_bot.send_message(
-        chat_id=order["passenger_id"],
-        text=f"Новое предложение!\nАвто: {data['car_model']}\nЦена: {message.text} ₽",
-        reply_markup=kb
-    )
+    await passenger_bot.send_message(order["passenger_id"],
+        f"Новое предложение!\nАвто: {data['car_model']}\nЦена: {message.text} ₽", reply_markup=kb)
     await message.answer("Предложение отправлено!", reply_markup=get_main_driver_kb(is_admin(message.from_user.id)))
 
-# === Остальной код (приём, чат, админ) ===
 @passenger_dp.callback_query(F.data.startswith("accept_"))
 async def accept_offer(call: types.CallbackQuery):
     offer_id = int(call.data.split("_")[1])
     offer = supabase.table("offers").select("*").eq("id", offer_id).execute().data[0]
+    if offer.get("rejected", False): await call.answer("Предложение отклонено."); return
     supabase.table("offers").update({"accepted": True}).eq("id", offer_id).execute()
     supabase.table("orders").update({"status": "accepted"}).eq("id", offer["order_id"]).execute()
+    driver = await get_user(offer["driver_id"]); passenger = await get_user(call.from_user.id)
+    await passenger_bot.send_message(call.from_user.id, f"Заказ принят!\nВодитель: {driver['name']}\nТелефон: {driver['phone']}")
+    await driver_bot.send_message(offer["driver_id"], f"Заказ принят!\nПассажир: {passenger['name']}\nТелефон: {passenger['phone']}")
 
-    order = supabase.table("orders").select("passenger_id").eq("id", offer["order_id"]).execute().data[0]
-    supabase.table("chats").insert({
-        "order_id": offer["order_id"],
-        "driver_id": offer["driver_id"],
-        "passenger_id": order["passenger_id"]
-    }).execute()
+@passenger_dp.callback_query(F.data.startswith("reject_"))
+async def reject_offer(call: types.CallbackQuery):
+    offer_id = int(call.data.split("_")[1])
+    offer = supabase.table("offers").select("*").eq("id", offer_id).execute().data[0]
+    supabase.table("offers").update({"rejected": True}).eq("id", offer_id).execute()
+    await driver_bot.send_message(offer["driver_id"], f"Ваше предложение отклонено.\nАвто: {offer['car_model']} — {offer['price']} ₽")
+    await call.message.edit_text(f"Предложение отклонено.\nАвто: {offer['car_model']} — {offer['price']} ₽")
 
-    driver = await get_user(offer["driver_id"])
-    passenger = await get_user(order["passenger_id"])
+@driver_dp.message(F.text == "Отменить поездку")
+async def cancel_trip_by_driver(message: types.Message):
+    offers = supabase.table("offers").select("order_id").eq("driver_id", message.from_user.id).eq("accepted", True).execute().data
+    if not offers: await message.answer("У вас нет принятых заказов."); return
+    order_id = offers[0]["order_id"]
+    supabase.table("offers").update({"accepted": False}).eq("order_id", order_id).execute()
+    supabase.table("orders").update({"status": "new"}).eq("id", order_id).execute()
+    order = supabase.table("orders").select("*").eq("id", order_id).execute().data[0]
+    await passenger_bot.send_message(order["passenger_id"], "Водитель отменил поездку. Заказ снова активен!")
+    await message.answer(f"Поездка отменена. Заказ #{order_id} снова доступен другим водителям.")
+    await notify_drivers(order, {
+        "from_address": order["from_address"], "to_address": order["to_address"],
+        "comment": order["comment"], "luggage": order["luggage"], "child": order["child"]
+    })
 
-    chat_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Чат с водителем", callback_data=f"chat_driver_{offer['order_id']}")],
-        [InlineKeyboardButton(text="Закрыть чат", callback_data=f"close_chat_{offer['order_id']}")]
-    ])
-    await passenger_bot.send_message(call.from_user.id, f"Заказ принят!\nВодитель: {driver['name']}\nТелефон: {driver['phone']}", reply_markup=chat_kb)
-    await driver_bot.send_message(offer["driver_id"], f"Заказ принят!\nПассажир: {passenger['name']}\nТелефон: {passenger['phone']}", reply_markup=chat_kb)
-
-@passenger_dp.callback_query(F.data.startswith("chat_driver_"))
-async def open_chat_passenger(call: types.CallbackQuery):
-    order_id = int(call.data.split("_")[2])
-    chat = supabase.table("chats").select("*").eq("order_id", order_id).execute().data[0]
-    if chat["closed"]:
-        await call.answer("Чат закрыт")
-        return
-    await call.message.edit_text("Пишите водителю (фото, голос, документ):")
-
-@driver_dp.callback_query(F.data.startswith("chat_driver_"))
-async def open_chat_driver(call: types.CallbackQuery):
-    order_id = int(call.data.split("_")[2])
-    chat = supabase.table("chats").select("*").eq("order_id", order_id).execute().data[0]
-    if chat["closed"]:
-        await call.answer("Чат закрыт")
-        return
-    await call.message.edit_text("Пишите пассажиру:")
-
-@passenger_dp.message(F.chat.type == "private", F.content_type.in_({"text", "photo", "voice", "document"}))
-async def forward_to_driver(message: types.Message):
-    chats = supabase.table("chats").select("*").eq("passenger_id", message.from_user.id).execute().data
-    if not chats or chats[0]["closed"]:
-        return
-    chat = chats[0]
-    await driver_bot.copy_message(chat_id=chat["driver_id"], from_chat_id=message.chat.id, message_id=message.message_id)
-
-@driver_dp.message(F.chat.type == "private", F.content_type.in_({"text", "photo", "voice", "document"}))
-async def forward_to_passenger(message: types.Message):
-    chats = supabase.table("chats").select("*").eq("driver_id", message.from_user.id).execute().data
-    if not chats or chats[0]["closed"]:
-        return
-    chat = chats[0]
-    await passenger_bot.copy_message(chat_id=chat["passenger_id"], from_chat_id=message.chat.id, message_id=message.message_id)
-
-@passenger_dp.callback_query(F.data.startswith("close_chat_"))
-async def close_chat(call: types.CallbackQuery):
-    order_id = int(call.data.split("_")[2])
-    supabase.table("chats").update({"closed": True}).eq("order_id", order_id).execute()
-    await call.message.edit_text("Чат закрыт.")
-
+# === ЧАТ С АДМИНОМ ===
 @passenger_dp.message(F.text == "Чат с админом")
 async def chat_admin_passenger(message: types.Message):
     await message.answer("Пишите админу:", reply_markup=types.ReplyKeyboardRemove())
-    await passenger_bot.copy_message(chat_id=ADMIN_ID, from_chat_id=message.chat.id, message_id=message.message_id)
+    await passenger_bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
 
 @driver_dp.message(F.text == "Чат с админом")
 async def chat_admin_driver(message: types.Message):
     await message.answer("Пишите админу:", reply_markup=types.ReplyKeyboardRemove())
-    await driver_bot.copy_message(chat_id=ADMIN_ID, from_chat_id=message.chat.id, message_id=message.message_id)
+    await driver_bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
 
+# === АДМИН-ПАНЕЛЬ ===
 @driver_dp.message(F.text == "Админ-панель")
 async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("Доступ запрещён.")
-        return
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="Пользователи")],
-        [KeyboardButton(text="Заказы")],
-        [KeyboardButton(text="Назад")]
-    ])
-    await message.answer("Админ-панель", reply_markup=kb)
+    if not is_admin(message.from_user.id): await message.answer("Доступ запрещён."); return
+    await message.answer("Админ-панель", reply_markup=ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [KeyboardButton(text="Пользователи")], [KeyboardButton(text="Заказы")], [KeyboardButton(text="Назад")]
+    ]))
 
 @driver_dp.message(F.text == "Пользователи")
 async def list_users(message: types.Message):
     if not is_admin(message.from_user.id): return
     users = supabase.table("users").select("telegram_id,name,role,blocked").execute().data
-    text = "Пользователи:\n"
-    for u in users:
-        status = "Заблокирован" if u["blocked"] else "Активен"
-        text += f"{u['name']} (@{u['telegram_id']}) — {u['role']} {status}\n"
+    text = "Пользователи:\n" + "\n".join(f"{u['name']} (@{u['telegram_id']}) — {u['role']} {'Заблокирован' if u['blocked'] else 'Активен'}" for u in users)
     await message.answer(text)
 
 @driver_dp.message(F.text == "Заказы")
 async def list_orders(message: types.Message):
     if not is_admin(message.from_user.id): return
     orders = supabase.table("orders").select("*").execute().data
-    text = "Заказы:\n"
-    for o in orders:
-        text += f"ID {o['id']} | {o['from_address']} → {o['to_address']} | {o['status']}\n"
+    text = "Заказы:\n" + "\n".join(f"ID {o['id']} | {o['from_address']} → {o['to_address']} | {o['status']}" for o in orders)
     await message.answer(text)
 
+# === ЗАПУСК ===
 async def main():
-    asyncio.create_task(cleanup_sessions())
     await asyncio.gather(
         passenger_dp.start_polling(passenger_bot),
         driver_dp.start_polling(driver_bot)
