@@ -34,8 +34,8 @@ driver_dp = Dispatcher(storage=MemoryStorage())
 
 # === Состояния ===
 class PassengerOrder(StatesGroup):
-    from_addr = State()
-    to_addr = State()
+    from_address = State()
+    to_address = State()
     comment = State()
     luggage = State()
     child = State()
@@ -124,19 +124,19 @@ async def passenger_contact(message: types.Message):
 @passenger_dp.message(F.text == "Заказать такси")
 async def order_start(message: types.Message, state: FSMContext):
     await state.set_state(PassengerOrder.from_addr)
-    await message.answer("Откуда едем? (улица, дом)")
+    await message.answer("Откуда едем? (город, улица, дом, подъезд)")
 
 @passenger_dp.message(PassengerOrder.from_addr)
 async def order_from(message: types.Message, state: FSMContext):
-    await state.update_data(from_addr=message.text)
+    await state.update_data(from_address=message.text)
     await state.set_state(PassengerOrder.to_addr)
-    await message.answer("Куда едем?")
+    await message.answer("Куда едем? (город, улица, дом, подъезд)")
 
 @passenger_dp.message(PassengerOrder.to_addr)
 async def order_to(message: types.Message, state: FSMContext):
-    await state.update_data(to_addr=message.text)
+    await state.update_data(to_address=message.text)
     await state.set_state(PassengerOrder.comment)
-    await message.answer("Комментарий к заказу (необязательно):")
+    await message.answer("Комментарий к заказу (если нет, просто напишите Нет):")
 
 @passenger_dp.message(PassengerOrder.comment)
 async def order_comment(message: types.Message, state: FSMContext):
@@ -160,8 +160,8 @@ async def order_child(call: types.CallbackQuery, state: FSMContext):
 
     order = supabase.table("orders").insert({
         "passenger_id": call.from_user.id,
-        "from_address": data["from_addr"],
-        "to_address": data["to_addr"],
+        "from_address": data["from_address"],
+        "to_address": data["to_address"],
         "comment": data["comment"],
         "luggage": data["luggage"],
         "child": data["child"],
@@ -340,3 +340,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
