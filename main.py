@@ -225,7 +225,7 @@ async def driver_price(message: types.Message, state: FSMContext):
     )
     await message.answer("Предложение отправлено!", reply_markup=get_main_driver_kb(is_admin(is_admin(message.from_user.id))))
 
-# === Остальное без изменений ===
+# === Остальное без изменений (оставь как есть) ===
 @passenger_dp.callback_query(F.data.startswith("accept_"))
 async def accept_offer(call: types.CallbackQuery):
     offer_id = int(call.data.split("_")[1])
