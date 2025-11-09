@@ -18,7 +18,7 @@ PASSENGER_TOKEN = os.getenv("PASSENGER_BOT_TOKEN")
 DRIVER_TOKEN = os.getenv("DRIVER_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -34,8 +34,8 @@ driver_dp = Dispatcher(storage=MemoryStorage())
 
 # === Состояния ===
 class PassengerOrder(StatesGroup):
-    from_addr = State()
-    to_addr = State()
+    from_address = State()
+    to_address = State()
     comment = State()
     luggage = State()
     child = State()
@@ -123,20 +123,20 @@ async def passenger_contact(message: types.Message):
 
 @passenger_dp.message(F.text == "Заказать такси")
 async def order_start(message: types.Message, state: FSMContext):
-    await state.set_state(PassengerOrder.from_addr)
-    await message.answer("Откуда едем? (город, улица, дом, подъезд)")
+    await state.set_state(PassengerOrder.from_address)
+    await message.answer("Откуда едем? (улица, дом)")
 
-@passenger_dp.message(PassengerOrder.from_addr)
+@passenger_dp.message(PassengerOrder.from_address)
 async def order_from(message: types.Message, state: FSMContext):
     await state.update_data(from_address=message.text)
-    await state.set_state(PassengerOrder.to_addr)
-    await message.answer("Куда едем? (город, улица, дом, подъезд)")
+    await state.set_state(PassengerOrder.to_address)
+    await message.answer("Куда едем?")
 
-@passenger_dp.message(PassengerOrder.to_addr)
+@passenger_dp.message(PassengerOrder.to_address)
 async def order_to(message: types.Message, state: FSMContext):
     await state.update_data(to_address=message.text)
     await state.set_state(PassengerOrder.comment)
-    await message.answer("Комментарий к заказу (если нет, просто напишите Нет):")
+    await message.answer("Комментарий к заказу (необязательно):")
 
 @passenger_dp.message(PassengerOrder.comment)
 async def order_comment(message: types.Message, state: FSMContext):
@@ -168,7 +168,10 @@ async def order_child(call: types.CallbackQuery, state: FSMContext):
         "status": "new"
     }).execute().data[0]
 
+    # === УВЕДОМЛЕНИЯ ВОДИТЕЛЯМ ===
     drivers = supabase.table("users").select("telegram_id").eq("role", "driver").execute().data
+    print(f"[ЛОГ] Найдено водителей: {len(drivers)}")
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Сделать предложение", callback_data=f"offer_{order['id']}")]
     ])
@@ -176,16 +179,35 @@ async def order_child(call: types.CallbackQuery, state: FSMContext):
         try:
             await driver_bot.send_message(
                 chat_id=driver["telegram_id"],
-                text=f"Новый заказ!\nОт: {data['from_addr']}\nКуда: {data['to_addr']}\nКомментарий: {data['comment'] or '—'}\nБагаж: {'Да' if data['luggage'] else 'Нет'}\nРебёнок: {'Да' if child else 'Нет'}",
+                text=f"Новый заказ!\nОт: {data['from_address']}\nКуда: {data['to_address']}\nКомментарий: {data['comment'] or '—'}\nБагаж: {'Да' if data['luggage'] else 'Нет'}\nРебёнок: {'Да' if child else 'Нет'}",
                 reply_markup=kb
             )
-        except:
-            pass
+            print(f"[ЛОГ] Уведомление отправлено водителю {driver['telegram_id']}")
+        except Exception as e:
+            print(f"[ОШИБКА] Не удалось отправить водителю {driver['telegram_id']}: {e}")
 
     await call.message.edit_text("Заказ создан! Ожидаем предложения.")
-    await call.message.answer("Выберете действие:", reply_markup=get_main_passenger_kb())
+    await call.message.answer("Выберите действие:", reply_markup=get_main_passenger_kb())
 
-# === Предложение от водителя ===
+# === ВОДИТЕЛЬСКИЙ БОТ ===
+@driver_dp.message(Command("start"))
+async def driver_start(message: types.Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
+    if not user:
+        await create_user(message.from_user.id, "driver", message.from_user.full_name)
+        await message.answer("Привет, водитель! Поделись номером для работы:", reply_markup=get_phone_kb())
+    else:
+        if user["blocked"]:
+            await message.answer("Вы заблокированы.")
+            return
+        await message.answer("Привет, водитель! Что хотите?", reply_markup=get_main_driver_kb(is_admin(message.from_user.id)))
+
+@driver_dp.message(F.contact)
+async def driver_contact(message: types.Message):
+    phone = message.contact.phone_number
+    supabase.table("users").update({"phone": phone}).eq("telegram_id", message.from_user.id).execute()
+    await message.answer("Номер сохранён!", reply_markup=get_main_driver_kb(is_admin(message.from_user.id)))
+
 @driver_dp.callback_query(F.data.startswith("offer_"))
 async def driver_offer_start(call: types.CallbackQuery, state: FSMContext):
     order_id = int(call.data.split("_")[1])
@@ -224,9 +246,9 @@ async def driver_price(message: types.Message, state: FSMContext):
         text=f"Новое предложение!\nАвто: {data['car_model']}\nЦена: {message.text} ₽",
         reply_markup=kb
     )
-    await message.answer("Предложение отправлено!", reply_markup=get_main_driver_kb(is_admin(is_admin(message.from_user.id))))
+    await message.answer("Предложение отправлено!", reply_markup=get_main_driver_kb(is_admin(message.from_user.id)))
 
-# === Остальной код (без изменений) ===
+# === Остальной код (приём, чат, админ) ===
 @passenger_dp.callback_query(F.data.startswith("accept_"))
 async def accept_offer(call: types.CallbackQuery):
     offer_id = int(call.data.split("_")[1])
@@ -341,6 +363,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
