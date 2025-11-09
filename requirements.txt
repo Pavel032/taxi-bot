@@ -1,4 +1,7 @@
 aiogram==3.13.1
-supabase>=2.9.0
+supabase==2.9.0
 python-dotenv
-httpx
+httpx>=0.27.0
+postgrest>=0.16.0
+realtime>=2.0.0
+gotrue>=2.7.0
