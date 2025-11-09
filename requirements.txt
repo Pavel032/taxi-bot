@@ -1,4 +1,5 @@
 aiogram==3.13.1
-supabase
+supabase-py
 python-dotenv
+
 asyncio
