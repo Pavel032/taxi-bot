@@ -169,6 +169,7 @@ async def order_child(call: types.CallbackQuery, state: FSMContext):
 
     # Уведомляем всех водителей
     drivers = supabase.table("users").select("telegram_id").eq("role", "driver").execute().data
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Сделать предложение", callback_data=f"offer_{order['id']}")]
     ])
@@ -348,4 +349,5 @@ async def main():
     )
 
 if __name__ == "__main__":
+
     asyncio.run(main())
